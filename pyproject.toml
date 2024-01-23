@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "x-config"
+name = "the-x-config"
 version = "0.1.2"
 description = "Services configuration"
 authors = ["Dmytro Smyk <porovozls@gmail.com>"]
