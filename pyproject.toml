@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "x-config"
-version = "0.1.0"
+version = "0.1.1"
 description = "Services configuration"
 authors = ["Dmytro Smyk <porovozls@gmail.com>"]
 license = "MIT"
