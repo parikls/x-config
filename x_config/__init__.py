@@ -110,7 +110,6 @@ class X:
             app_dir: str | Path = None
     ) -> tuple[Path, Path, Path]:
         """
-
         :param config_path:
         :param dotenv_dir:
         :param app_dir:
