@@ -10,7 +10,11 @@ from mako.lookup import TemplateLookup
 from pydantic import create_model, BaseModel
 from yaml import YAMLError
 
-from x_config.x_secrets import SecretsSource, SECRET_SOURCE_REQUIRED_PROPS, SECRET_SPECIFIC_PROPS
+from x_config.errors import XConfigError
+from x_config.x_secrets import (
+    SecretsSource, SECRET_SOURCE_REQUIRED_PROPS, SECRET_SPECIFIC_PROPS,
+    SECRETS_SOURCE_PROP_NAME
+)
 from x_config.x_secrets.aws import load_aws_secrets
 from x_config.x_secrets.dotenv import load_dotenv_secrets
 
@@ -22,30 +26,22 @@ CONFIG_SECTION_CONSTANTS = 'constants'
 CONFIG_SECTION_SECRETS = 'secrets'
 CONFIG_SECTION_BASE = 'base'
 
-SECRETS_SOURCE_PROP_NAME = 'secrets_source'
-
-
-class ConfigurationError(Exception):
-    """
-    Base configuration error
-    """
-
 
 class X:
 
     def __init__(
             self,
-            constants: BaseModel,
-            floating: BaseModel,
-            secrets: BaseModel,
-            env: Enum,
-            Env: Type[Enum]  # noqa
+            x_const: BaseModel,
+            x_env: BaseModel,
+            x_secret: BaseModel,
+            current_environment: Enum,
+            environment_choices: Type[Enum]
     ):
-        self.constants = constants
-        self.floating = floating
-        self.secrets = secrets
-        self.env = env
-        self.Env = Env
+        self.x_const = x_const
+        self.x_env = x_env
+        self.x_secret = x_secret
+        self.current_environment = current_environment
+        self.environment_choices = environment_choices
 
     @classmethod
     def config(
@@ -53,8 +49,7 @@ class X:
             *,
             config_path: str | Path = None,
             dotenv_dir: str | Path = None,
-            app_dir: str | Path = None,
-            aws_region: str = 'us-east-1'
+            app_dir: str | Path = None
     ):
         """
         entry-point for configuration
@@ -62,44 +57,49 @@ class X:
         :param config_path: a path to a dir where `config.yaml` sits
         :param dotenv_dir: a path to a dir where dotenv file sits
         :param app_dir: a path to a root of app directory (e.g., your root python module)
-        :param aws_region: AWS Secrets region
         """
         try:
             env = os.environ['ENV']
         except KeyError:
-            raise ConfigurationError('X.config: environment variable `ENV` must be set')
+            raise XConfigError('environment variable `ENV` must be set')
 
         config_path, dotenv_dir, app_dir = cls.ensure_paths(config_path, dotenv_dir, app_dir)
 
         full_config = cls.load_full_config(config_path)
         constants_model = cls.create_constants_model(config=full_config)
         secrets_model = cls.create_secrets_model(config=full_config)
-        floating_model = cls.create_floating_model(config=full_config)
-        Env = cls.create_env_enum(full_config)  # noqa
-        cls.render_pyi(app_dir, constants_model, floating_model, secrets_model, envs=Env)
+        env_model = cls.create_env_model(config=full_config)
+        env_choices = cls.create_env_choices_enum(full_config)
+        cls.render_pyi(
+            app_dir=app_dir,
+            constants_model=constants_model,
+            env_model=env_model,
+            secrets_model=secrets_model,
+            env_choices=env_choices
+        )
 
-        floating_config = cls._validate_and_get_floating_config(full_config=full_config, env=env)
-        secrets_source = cls._get_secrets_source(floating_config=floating_config)
+        env_config = cls._validate_and_get_env_config(full_config=full_config, env=env)
+        secrets_source = cls._get_secrets_source(env_config=env_config)
 
         # populate constants with defaults
-        constants = constants_model()
-
-        # populate floating from config
-        floating = floating_model.model_validate(floating_config)
+        const_vars = constants_model()
 
         # populate secrets either from .env or from AWS secrets
         if secrets_source is SecretsSource.AWS:
-            secrets = load_aws_secrets(secret_name=floating.SECRETS_AWS_SECRET_NAME, region=aws_region)
+            secrets = load_aws_secrets(config=env_config)
         else:
-            secrets = load_dotenv_secrets(dotenv_dir=dotenv_dir, dotenv_name=floating.SECRETS_DOTENV_NAME)
-        secrets = secrets_model.model_validate(secrets)
+            secrets = load_dotenv_secrets(dotenv_dir=dotenv_dir, config=env_config)
+        secrets_vars = secrets_model.model_validate(secrets)
+
+        # populate env config
+        env_vars = env_model.model_validate({k.upper(): v for k, v in env_config.items()})
 
         return cls(
-            constants=constants,
-            floating=floating,
-            secrets=secrets,
-            env=Env(env),
-            Env=Env
+            x_const=const_vars,
+            x_env=env_vars,
+            x_secret=secrets_vars,
+            current_environment=env_choices(env),
+            environment_choices=env_choices
         )
 
     @classmethod
@@ -127,21 +127,21 @@ class X:
                 Path(config_path) if config_path else Path(default_root_dir) / 'config.yaml'
             )
         except TypeError:
-            raise ConfigurationError(f'X.config: invalid config_path {config_path}')
+            raise XConfigError(f'invalid config_path {config_path}')
 
         try:
             dotenv_dir = Path(dotenv_dir or default_root_dir)
         except TypeError:
-            raise ConfigurationError(f'X.config: invalid dotenv_dir {dotenv_dir}')
+            raise XConfigError(f'invalid dotenv_dir {dotenv_dir}')
 
         try:
             app_dir = Path(app_dir or default_app_dir)
         except TypeError:
-            raise ConfigurationError(f'X.config: invalid app_dir {app_dir}')
+            raise XConfigError(f'invalid app_dir {app_dir}')
 
         for path in (config_path, dotenv_dir, app_dir):
             if not path.exists():
-                raise ConfigurationError(f'X.config: {path} does not exists')
+                raise XConfigError(f'{path} does not exists')
 
         return config_path, dotenv_dir, app_dir
 
@@ -154,15 +154,16 @@ class X:
             try:
                 return yaml.load(f, Loader=yaml.CSafeLoader)
             except YAMLError:
-                raise ConfigurationError(f'X.config: invalid yaml file: {config_path}')
+                raise XConfigError(f'invalid yaml file: {config_path}')
 
     @classmethod
     def create_constants_model(cls, config: dict):
         try:
             constants = config.pop(CONFIG_SECTION_CONSTANTS)
         except KeyError:
-            raise ConfigurationError(f'X.config: section `{CONFIG_SECTION_CONSTANTS}` '
-                                     f'does not exist in a config.yaml file')
+            raise XConfigError(
+                f'section `{CONFIG_SECTION_CONSTANTS}` does not exist in a config.yaml file'
+            )
 
         return cls._create_pydantic_model(
             'Constants',
@@ -172,15 +173,21 @@ class X:
         )
 
     @classmethod
-    def create_floating_model(cls, config: dict):
+    def create_env_model(cls, config: dict):
         # pick any non-base section
         any_section = [x for x in config.keys() if x != CONFIG_SECTION_BASE][0]
 
-        # merge with base
-        definition = {**{k: v for k, v in config[CONFIG_SECTION_BASE].items()}, **{k: v for k, v in config[any_section].items()}}
+        # pick `base` section and merge with env-specific
+        definition = {
+            **{k: v for k, v in config[CONFIG_SECTION_BASE].items()},
+            **{k: v for k, v in config[any_section].items()}
+        }
+
+        # remove secret-specific props
+        definition = {k: v for k, v in definition.items() if k not in SECRET_SPECIFIC_PROPS}
 
         return cls._create_pydantic_model(
-            'Floating',
+            'Env',
             config_contents=definition,
             type_func=type,
             use_value_as_default=False
@@ -191,8 +198,8 @@ class X:
         try:
             secrets = config.pop('secrets')
         except KeyError:
-            raise ConfigurationError(
-                f'X.config: section `{CONFIG_SECTION_SECRETS}` does not exist in a config.yaml file'
+            raise XConfigError(
+                f'section `{CONFIG_SECTION_SECRETS}` does not exist in a config.yaml file'
             )
         return cls._create_pydantic_model(
             'Secrets',
@@ -202,24 +209,23 @@ class X:
         )
 
     @classmethod
-    def create_env_enum(cls, config: dict):
+    def create_env_choices_enum(cls, config: dict) -> Type[Enum]:
         return Enum(
-            'Env',
+            'Environment',
             {x.upper(): x for x in [x for x in config.keys() if x != CONFIG_SECTION_BASE]}
         )
-
 
     @classmethod
     def render_pyi(
             cls,
             app_dir: Path,
             constants_model: Type[BaseModel],
-            floating_model: Type[BaseModel],
+            env_model: Type[BaseModel],
             secrets_model: Type[BaseModel],
-            envs: Type[Enum]
+            env_choices: Type[Enum]
     ):
         """
-        Renders __init__.pyi file which will be used by an IDE for autocompletion
+        Renders __init__.pyi file in the app_dir which will be used by an IDE for autocompletion
         """
         constants_def = []
         constants = constants_model()
@@ -234,13 +240,12 @@ class X:
         template = lookup.get_template("template.mako")
         rendered = template.render(
             constants=constants_def,
-            floating=floating_model,
-            secrets=secrets_model,
-            envs=envs
+            env_vars_model=env_model,
+            secret_vars_model=secrets_model,
+            env_choices=env_choices
         )
         with (app_dir / '__init__.pyi').open('w') as f:
             f.write(rendered)
-
 
     @classmethod
     def _create_pydantic_model(
@@ -285,7 +290,7 @@ class X:
         )
 
     @classmethod
-    def _validate_and_get_floating_config(cls, full_config: dict, env: str):
+    def _validate_and_get_env_config(cls, full_config: dict, env: str) -> dict:
         """
         Merges base + selected-env config and returns.
         Also performs a validation by comparing a current selected section
@@ -296,18 +301,18 @@ class X:
         try:
             base_section = full_config.pop(CONFIG_SECTION_BASE)
         except KeyError:
-            raise ConfigurationError(
-                f'X.Config: section `{CONFIG_SECTION_BASE}` does not exist in a config.yaml file')
+            raise XConfigError(
+                f'section `{CONFIG_SECTION_BASE}` does not exist in a config.yaml file')
 
         try:
             env_section = full_config.pop(env)
         except KeyError:
-            raise ConfigurationError(f'.Config: section `{env}` does not exist in a config.yaml file, '
-                                     f'though `ENV` environment variable is set to a `{env}`')
+            raise XConfigError(f'section `{env}` does not exist in a config.yaml file, '
+                               f'though `ENV` environment variable is set to a `{env}`')
 
         # merge env-specific and base sections
-        floating_config = {**base_section, **env_section}
-        env_keys = {k for k in floating_config.keys() if k not in SECRET_SPECIFIC_PROPS}
+        env_config = {**base_section, **env_section}
+        env_keys = {k for k in env_config.keys() if k not in SECRET_SPECIFIC_PROPS}
 
         # ensure that this env section has all the keys that all other envs have, and vice versa
         for other_env, other_env_section in full_config.items():
@@ -315,44 +320,42 @@ class X:
             other_keys = {k for k in other_env_config.keys() if k not in SECRET_SPECIFIC_PROPS}
             missing_keys = other_keys - env_keys
             if missing_keys:
-                raise ConfigurationError(f'X.Config: keys `{missing_keys}` are missing in '
-                                         f'env `{env}`, but present in env `{other_env}`')
+                raise XConfigError(f'keys `{missing_keys}` are missing in '
+                                   f'env `{env}`, but present in env `{other_env}`')
 
             extra_keys = env_keys - other_keys
             if extra_keys:
-                raise ConfigurationError(f'.Config: keys `{extra_keys}` are missing in '
-                                         f'env `{other_env}`, but present in env `{env}`')
+                raise XConfigError(f'keys `{extra_keys}` are missing in '
+                                   f'env `{other_env}`, but present in env `{env}`')
 
             # now let's compare types
             for key in env_keys:
-                env_type = type(floating_config[key])
+                env_type = type(env_config[key])
                 other_env_type = type(other_env_config[key])
                 if env_type is not other_env_type:
-                    raise ConfigurationError(
-                        f'X.Config: key `{env}.{key}` is of type {env_type}, '
+                    raise XConfigError(
+                        f'key `{env}.{key}` is of type {env_type}, '
                         f'while {other_env}.{key} is of type {other_env_type}'
                     )
 
-        return {k.upper(): v for k, v in floating_config.items()}
+        return env_config
 
     @classmethod
-    def _get_secrets_source(cls, floating_config: dict) -> SecretsSource:
+    def _get_secrets_source(cls, env_config: dict) -> SecretsSource:
         try:
-            secrets_source = floating_config[SECRETS_SOURCE_PROP_NAME.upper()]
+            secrets_source = env_config.pop(SECRETS_SOURCE_PROP_NAME)
         except KeyError:
-            raise ConfigurationError(
-                f'X.config: `{SECRETS_SOURCE_PROP_NAME}` property was not found in config'
-            )
+            raise XConfigError(f'`{SECRETS_SOURCE_PROP_NAME}` property was not found in config')
 
         try:
             secrets_source = SecretsSource(secrets_source)
         except ValueError:
-            raise ConfigurationError(f'X.config: unknown source of secrets {secrets_source}')
+            raise XConfigError(f'unknown source of secrets {secrets_source}')
 
         for required_secrets_prop in SECRET_SOURCE_REQUIRED_PROPS[secrets_source]:
-            if required_secrets_prop.upper() not in floating_config:
-                raise ConfigurationError(
-                    f'X.config: `{required_secrets_prop}` property is a required '
+            if required_secrets_prop not in env_config:
+                raise XConfigError(
+                    f'`{required_secrets_prop}` property is a required '
                     f'for `{secrets_source}` secrets source'
                 )
 

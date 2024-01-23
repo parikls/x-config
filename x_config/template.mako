@@ -7,21 +7,21 @@ from typing import Type
 from pydantic import BaseModel
 
 
-class Env(Enum):
-% for env in envs:
+class Environment(Enum):
+% for env in env_choices:
     ${env.name.upper()} = '${env.value}'
 % endfor
 
 
-class Constants(BaseModel):
+class ConstVars(BaseModel):
 % for key, type, value in constants:
     ${key}: ${type} = ${value}
 % endfor
 
 
-class Floating(BaseModel):
-% if floating:
-% for key, type in floating.__annotations__.items():
+class EnvVars(BaseModel):
+% if env_vars_model:
+% for key, type in env_vars_model.__annotations__.items():
     ${key}: ${type.__name__}
 % endfor
 % else:
@@ -29,9 +29,9 @@ class Floating(BaseModel):
 % endif
 
 
-class Secrets(BaseModel):
-% if secrets:
-% for key, type in secrets.__annotations__.items():
+class SecretVars(BaseModel):
+% if secret_vars_model:
+% for key, type in secret_vars_model.__annotations__.items():
     ${key}: ${type.__name__}
 % endfor
 % else:
@@ -40,11 +40,11 @@ class Secrets(BaseModel):
 
 
 class Config:
-    constants: Constants
-    floating: Floating
-    secrets: Secrets
-    env: Env
-    Env: Type[Env]
+    x_const: ConstVars
+    x_env: EnvVars
+    x_secret: SecretVars
+    current_environment: Environment
+    environment_choices: Type[Environment]
 
 
 config: Config

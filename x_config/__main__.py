@@ -27,9 +27,9 @@ def main():
     full_config = X.load_full_config(config_dir)
     constants_model = X.create_constants_model(config=full_config)
     secrets_model = X.create_secrets_model(config=full_config)
-    floating_model = X.create_floating_model(config=full_config)
-    Env = X.create_env_enum(full_config)  # noqa
-    X.render_pyi(app_dir, constants_model, floating_model, secrets_model, envs=Env)
+    env_model = X.create_env_model(config=full_config)
+    env_choices = X.create_env_choices_enum(full_config)
+    X.render_pyi(app_dir, constants_model, env_model, secrets_model, env_choices=env_choices)
 
 
 if __name__ == '__main__':
