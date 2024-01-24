@@ -6,6 +6,7 @@ from pydoc import locate
 from typing import Type, Callable
 
 import yaml
+from mako.exceptions import MakoException
 from mako.lookup import TemplateLookup
 from pydantic import create_model, BaseModel
 from yaml import YAMLError
@@ -19,8 +20,6 @@ from x_config.x_secrets.aws import load_aws_secrets
 from x_config.x_secrets.dotenv import load_dotenv_secrets
 
 logger = logging.getLogger(__name__)
-
-HERE = Path(__file__).parent
 
 CONFIG_SECTION_CONSTANTS = 'constants'
 CONFIG_SECTION_SECRETS = 'secrets'
@@ -79,17 +78,16 @@ class X:
         )
 
         env_config = cls._validate_and_get_env_config(full_config=full_config, env=env)
-        secrets_source = cls._get_secrets_source(env_config=env_config)
 
         # populate constants with defaults
         const_vars = constants_model()
 
-        # populate secrets either from .env or from AWS secrets
-        if secrets_source is SecretsSource.AWS:
-            secrets = load_aws_secrets(config=env_config)
-        else:
-            secrets = load_dotenv_secrets(dotenv_dir=dotenv_dir, config=env_config)
-        secrets_vars = secrets_model.model_validate(secrets)
+        # populate secrets
+        secrets_vars = cls._populate_secrets(
+            secrets_model=secrets_model,
+            config=env_config,
+            dotenv_dir=dotenv_dir
+        )
 
         # populate env config
         env_vars = env_model.model_validate({k.upper(): v for k, v in env_config.items()})
@@ -110,14 +108,12 @@ class X:
             app_dir: str | Path = None
     ) -> tuple[Path, Path, Path]:
         """
-        :param config_path:
-        :param dotenv_dir:
-        :param app_dir:
-        :return:
+        Ensures that all provided paths exist
         """
 
         # will use default dirs based on a current dir.
-        # can be useful for cli command to generate `.pyi` file
+        # can be useful for cli command to generate an `__init__.pyi` file,
+        # so user won't need to pass extra cli args
         default_app_dir = Path(os.getcwd())
         default_root_dir = default_app_dir.parent
 
@@ -157,7 +153,11 @@ class X:
                 raise XConfigError(f'invalid yaml file: {config_path}')
 
     @classmethod
-    def create_constants_model(cls, config: dict):
+    def create_constants_model(cls, config: dict) -> Type[BaseModel]:
+        """
+        Creates a pydantic model based on provided `config`.
+        Will pop `constants` section out of it
+        """
         try:
             constants = config.pop(CONFIG_SECTION_CONSTANTS)
         except KeyError:
@@ -173,11 +173,35 @@ class X:
         )
 
     @classmethod
-    def create_env_model(cls, config: dict):
-        # pick any non-base section
+    def create_secrets_model(cls, config: dict) -> Type[BaseModel]:
+        """
+        Creates a pydantic model based on a provided `config`.
+        Will pop `secrets` section out of it
+        """
+        try:
+            secrets = config.pop(CONFIG_SECTION_SECRETS)
+        except KeyError:
+            raise XConfigError(
+                f'section `{CONFIG_SECTION_SECRETS}` does not exist in a config.yaml file'
+            )
+        return cls._create_pydantic_model(
+            'Secrets',
+            secrets,
+            type_func=locate,
+            use_value_as_default=False
+        )
+
+    @classmethod
+    def create_env_model(cls, config: dict) -> Type[BaseModel]:
+        """
+        Creates an environment-specific pydantic model based on a provided `config`.
+        Will use any environment section to get all the necessary env keys
+        """
+        # at this point we've already popped out constants and secrets,
+        # therefore, we may pick an any non-base section
         any_section = [x for x in config.keys() if x != CONFIG_SECTION_BASE][0]
 
-        # pick `base` section and merge with env-specific
+        # merge `base` section with an env-specific section
         definition = {
             **{k: v for k, v in config[CONFIG_SECTION_BASE].items()},
             **{k: v for k, v in config[any_section].items()}
@@ -194,22 +218,10 @@ class X:
         )
 
     @classmethod
-    def create_secrets_model(cls, config: dict):
-        try:
-            secrets = config.pop('secrets')
-        except KeyError:
-            raise XConfigError(
-                f'section `{CONFIG_SECTION_SECRETS}` does not exist in a config.yaml file'
-            )
-        return cls._create_pydantic_model(
-            'Secrets',
-            secrets,
-            type_func=locate,
-            use_value_as_default=False
-        )
-
-    @classmethod
     def create_env_choices_enum(cls, config: dict) -> Type[Enum]:
+        """
+        Returns an enum with all possible environments choices
+        """
         return Enum(
             'Environment',
             {x.upper(): x for x in [x for x in config.keys() if x != CONFIG_SECTION_BASE]}
@@ -227,23 +239,33 @@ class X:
         """
         Renders __init__.pyi file in the app_dir which will be used by an IDE for autocompletion
         """
+
+        # prepare a constants definition to populate `.pyi` file with defaults
         constants_def = []
         constants = constants_model()
         for key, type_ in constants.__annotations__.items():
+            value = getattr(constants, key)
             if type_ is str:
-                value = f"'{getattr(constants, key)}'"
-            else:
-                value = getattr(constants, key)
+                value = f"'{value}'"  # enclose value in a single parenthesis
             constants_def.append((key, type_.__name__, value))
 
-        lookup = TemplateLookup(directories=[HERE], filesystem_checks=False)
-        template = lookup.get_template("template.mako")
-        rendered = template.render(
-            constants=constants_def,
-            env_vars_model=env_model,
-            secret_vars_model=secrets_model,
-            env_choices=env_choices
-        )
+        here = Path(__file__).parent
+        lookup = TemplateLookup(directories=[here], filesystem_checks=False)
+        try:
+            template = lookup.get_template("template.mako")
+        except MakoException:
+            raise XConfigError('internal error. unable to find `template.mako` file')
+
+        try:
+            rendered = template.render(
+                constants=constants_def,
+                env_vars_model=env_model,
+                secret_vars_model=secrets_model,
+                env_choices=env_choices
+            )
+        except MakoException:
+            raise XConfigError('internal error. unable to render template')
+
         with (app_dir / '__init__.pyi').open('w') as f:
             f.write(rendered)
 
@@ -341,9 +363,17 @@ class X:
         return env_config
 
     @classmethod
-    def _get_secrets_source(cls, env_config: dict) -> SecretsSource:
+    def _populate_secrets(cls,
+                          secrets_model: Type[BaseModel],
+                          config: dict,
+                          dotenv_dir: Path) -> BaseModel:
+        """
+        Populates `secrets_model` with the secret data
+        """
+
+        # load and validate secrets definitions
         try:
-            secrets_source = env_config.pop(SECRETS_SOURCE_PROP_NAME)
+            secrets_source = config.pop(SECRETS_SOURCE_PROP_NAME)
         except KeyError:
             raise XConfigError(f'`{SECRETS_SOURCE_PROP_NAME}` property was not found in config')
 
@@ -353,10 +383,17 @@ class X:
             raise XConfigError(f'unknown source of secrets {secrets_source}')
 
         for required_secrets_prop in SECRET_SOURCE_REQUIRED_PROPS[secrets_source]:
-            if required_secrets_prop not in env_config:
+            if required_secrets_prop not in config:
                 raise XConfigError(
                     f'`{required_secrets_prop}` property is a required '
                     f'for `{secrets_source}` secrets source'
                 )
 
-        return secrets_source
+        # do an actual load of secrets
+        if secrets_source is SecretsSource.AWS:
+            secrets = load_aws_secrets(config=config)
+        else:
+            secrets = load_dotenv_secrets(dotenv_dir=dotenv_dir, config=config)
+
+        # build and return populated model
+        return secrets_model.model_validate(secrets)

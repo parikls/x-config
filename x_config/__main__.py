@@ -4,6 +4,9 @@ from x_config import X
 
 
 def main():
+    """
+    Console script to generate an initial `__init__.pyi` file
+    """
     parser = ArgumentParser()
     parser.add_argument(
         '--config-path',
