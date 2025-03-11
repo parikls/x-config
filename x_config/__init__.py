@@ -18,6 +18,7 @@ from x_config.x_secrets import (
 )
 from x_config.x_secrets.aws import load_aws_secrets
 from x_config.x_secrets.dotenv import load_dotenv_secrets
+from x_config.x_secrets.kube import load_kube_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +393,8 @@ class X:
         # do an actual load of secrets
         if secrets_source is SecretsSource.AWS:
             secrets = load_aws_secrets(config=config)
+        elif secrets_source is SecretsSource.KUBE:
+            secrets = load_kube_secrets(config=config)
         else:
             secrets = load_dotenv_secrets(dotenv_dir=dotenv_dir, config=config)
 
