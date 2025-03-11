@@ -19,7 +19,7 @@ def load_kube_secrets(config: dict) -> dict:
     except KeyError:
         raise XConfigError(f'unable to extract `{SECRETS_KUBE_NAMESPACE} property')
 
-    kube_config.load_kube_config()
+    kube_config.load_incluster_config()
     v1 = client.CoreV1Api()
     contents = v1.read_namespaced_secret(name=secret_name, namespace=namespace)
     return {k.upper(): v for k, v in contents.items()}
