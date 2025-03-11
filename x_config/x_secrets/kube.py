@@ -1,5 +1,8 @@
-from x_config import XConfigError
+from base64 import b64decode
+
 from kubernetes import client, config as kube_config
+
+from x_config import XConfigError
 
 SECRETS_KUBE_SECRET_NAME = 'secrets_kube_secret_name'
 SECRETS_KUBE_NAMESPACE = 'secrets_kube_namespace'
@@ -22,4 +25,4 @@ def load_kube_secrets(config: dict) -> dict:
     kube_config.load_incluster_config()
     v1 = client.CoreV1Api()
     contents = v1.read_namespaced_secret(name=secret_name, namespace=namespace)
-    return {k.upper(): v for k, v in contents.items()}
+    return {k.upper(): b64decode(v).decode('utf-8') for k, v in contents.data.items()}
